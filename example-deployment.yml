@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-deployment
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      run: example-deployment
+  template:
+    metadata:
+      labels:
+        run: example-deployment
+    spec:
+      containers:
+      - name: example-deployment
+        image: k8s.gcr.io/pause
+      nodeSelector:
+        kubernetes.io/os: linux
+---
+apiVersion: policy/v1beta1
+kind: PodDisruptionBudget
+metadata:
+  name: example-deployment-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      run: example-deployment
