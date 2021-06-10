@@ -20,10 +20,10 @@ import (
 )
 
 func main() {
-	// creates the in-cluster config
+	// assume we are running in cluster
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		// fall back to out-of-cluster config
+		// fall back to out-of-cluster config for development / debugging
 		var kubeconfig *string
 		if home := homedir.HomeDir(); home != "" {
 			kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
@@ -32,14 +32,12 @@ func main() {
 		}
 		flag.Parse()
 
-		// use the current context in kubeconfig
 		config, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
 		if err != nil {
 			panic(err.Error())
 		}
 	}
 
-	// creates the clientset
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		panic(err.Error())
@@ -48,32 +46,42 @@ func main() {
 	nodeName := os.Getenv("KUBERNETES_NODE_NAME")
 
 	for {
-		node, err := clientset.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+		err := fixStuckDeployments(*clientset, nodeName)
 		if err != nil {
 			panic(err.Error())
 		}
-		if node.Spec.Unschedulable {
-			fmt.Print("Node is unschedulable, getting apps\n")
-			deployments, err := getStuckDeployments(*clientset, nodeName)
-			if err != nil {
-				panic(err.Error())
-			}
-			for _, deployment := range deployments {
-				if _, ok := deployment.Spec.Template.Annotations["kubedrainrollout.kubernetes.io/restartedAt"]; ok {
-					fmt.Printf("Detected stuck deployment %s in namespace%s, already being restarted...", deployment.Name, deployment.Namespace)
-					continue
-				}
-				patch := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kubedrainrollout.kubernetes.io/restartedAt":"%s"}}}}}`, time.Now().Format(time.RFC3339)))
-				fmt.Printf("Detected stuck deployment %s in namespace%s, restarting rollout...\n%s", deployment.Name, deployment.Namespace, string(patch))
-				_, err := clientset.AppsV1().Deployments(deployment.Namespace).Patch(context.TODO(), deployment.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
-				if err != nil {
-					panic(err.Error())
-				}
-			}
-		}
 
-		time.Sleep(5 * time.Second)
+		time.Sleep(30 * time.Second)
 	}
+}
+
+func fixStuckDeployments(clientset kubernetes.Clientset, nodeName string) error {
+	node, err := clientset.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if !node.Spec.Unschedulable {
+		fmt.Print("Node is schedulable, ignoring\n")
+		return nil
+	}
+	fmt.Print("Node is unschedulable, getting apps\n")
+	deployments, err := getStuckDeployments(clientset, nodeName)
+	if err != nil {
+		return err
+	}
+	for _, deployment := range deployments {
+		if _, ok := deployment.Spec.Template.Annotations["kubedrainrollout.kubernetes.io/restartedAt"]; ok {
+			fmt.Printf("Detected stuck deployment %s in namespace%s, already being restarted...", deployment.Name, deployment.Namespace)
+			continue
+		}
+		patch := []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kubedrainrollout.kubernetes.io/restartedAt":"%s"}}}}}`, time.Now().Format(time.RFC3339)))
+		fmt.Printf("Detected stuck deployment %s in namespace%s, restarting rollout...\n%s", deployment.Name, deployment.Namespace, string(patch))
+		_, err := clientset.AppsV1().Deployments(deployment.Namespace).Patch(context.TODO(), deployment.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func getStuckDeployments(clientset kubernetes.Clientset, nodeName string) ([]*v1.Deployment, error) {
